@@ -2,26 +2,30 @@ import requests, time, sys, dateparser, re, sqlite3, threading, queue
 from bs4 import BeautifulSoup
 
 locker = threading.Lock()
+
+
 def sprint(*a, **b):
     with locker:
         print(*a, **b)
 
+
 class Parser:
     def __init__(self):
         self._console = True
-        self.db_name = 'datebase.db'
+        self.db_name = 'database.db'
         self.res = self.db_get()
         self.link_title = {}
         self.link_date = {}
         self.max_thread = 15
-
 
     def db_insert(self, res_id, link, title, content, nd_date, s_date, not_date):
         if self._console:
             sprint("[" + self.db_name + "] " + "Запись данных. ЗАГОЛОВОК: " + title)
         conn = sqlite3.connect(self.db_name)
         cur = conn.cursor()
-        cur.execute(f"""INSERT INTO items(res_id, link, title, content, nd_date, s_date, not_date) VALUES({res_id}, '{link}', '{title}', '{content}', {nd_date}, {s_date}, '{not_date}');""")
+        cur.execute(
+            f"""INSERT INTO items(res_id, link, title, content, nd_date, s_date, not_date) VALUES({res_id}, '{link}', 
+            '{title}', '{content}', {nd_date}, {s_date}, '{not_date}');""")
         conn.commit()
 
     def db_get(self):
@@ -32,7 +36,7 @@ class Parser:
 
     def get_link(self, link, url):
         l = link.get('href')
-        if link is None:
+        if l is None:
             for child in link.recursiveChildGenerator():
                 if child.name:
                     l = child.get('href')
@@ -53,24 +57,33 @@ class Parser:
         return t
 
     def get_date(self, date):
-        d = dateparser.parse(date.text.strip().replace(",", ""))
+        try:
+            d = dateparser.parse(date.text.strip().replace(",", ""))
+        except:
+            d = None
         if d is None:
-            d = dateparser.parse(str(date.get('datetime')))
+            try:
+                d = dateparser.parse(str(date.get('datetime')))
+            except:
+                d = None
             if d is None:
                 for child in date.recursiveChildGenerator():
                     if child.name:
-                        d = dateparser.parse(child.text.strip().replace(",", ""))
+                        try:
+                            d = dateparser.parse(child.text.strip().replace(",", ""))
+                        except:
+                            d = None
                         if d is None:
                             d = dateparser.parse(str(child.get('datetime')))
                         if d:
                             break
         return d
 
-    def get_content(self, tag, url):
+    def get_content(self, tag, dates, link, RESOURCE_URL):
         if self._console:
-            sprint("Получение контента: " + url)
+            sprint("Получение контента: " + link)
         fin_content = ""
-        response = requests.get(url)
+        response = requests.get(link)
         soup = BeautifulSoup(response.text, 'lxml')
         contents = self.finder(tag, soup)
         url_pattern = r'https://[\S]+'
@@ -82,6 +95,44 @@ class Parser:
                         fin_content = content.text.strip()
                         if fin_content:
                             break
+
+        _dates = self.finder('time', soup)
+        d_flag = False
+        for _date in _dates:
+            for date in dates:
+                if self.get_date(_date) == date:
+                    d_flag = True
+                    self.link_date[RESOURCE_URL][link] = date
+                    break
+            if d_flag:
+                break
+
+        if not d_flag:
+            _dates = []
+            body = soup.find_all('body')[0]
+            for child in body.recursiveChildGenerator():
+                try:
+                    date_pattern = r'\d\d:\d\d'
+                    d = re.findall(date_pattern, child.text)[0]
+                except:
+                    d = None
+                if not d is None:
+                    _dates.append(str(d))
+                if len(_dates) == 50:
+                    break
+        for _date in _dates:
+            for date in dates:
+                try:
+                    s_date = date.strftime("%H:%M")
+                    if _date == s_date:
+                        d_flag = True
+                        self.link_date[RESOURCE_URL][link] = date
+                        break
+                except:
+                    continue
+            if d_flag:
+                break
+
         try:
             urls = re.findall(url_pattern, fin_content)
             for u in urls:
@@ -115,7 +166,7 @@ class Parser:
             _data += soup.find_all(el)
         return _data
 
-    def compare(self, _id, titles, dates, q, url):
+    def compare(self, _id, titles, q, url):
         while True:
             link = q.get()
             if self._console:
@@ -134,27 +185,28 @@ class Parser:
                             flag = True
                             break
                     if not flag:
-                        self.link_date[url][link] = dates[i]
                         self.link_title[url][link] = titles[i]
                         break
             q.task_done()
 
-    def final(self,bottom_tag, RESOURCE_ID, q, RESOURCE_URL):
+    def final(self, bottom_tag, fin_dates, RESOURCE_ID, q, RESOURCE_URL):
         link = q.get()
+        content = self.get_content(bottom_tag, fin_dates, link, RESOURCE_URL)
         try:
             title = self.link_title[RESOURCE_URL][link]
+
             d = self.link_date[RESOURCE_URL][link]
             s_date = str(time.time())
             not_date = str(dateparser.parse(str(d), date_formats=['%Y %B %d']))
             t = (d.year, d.month, d.day, d.hour, d.minute, d.second, d.microsecond, 0, 0)
             nd_date = str(time.mktime(t))
-            content = self.get_content(bottom_tag, link)
             self.db_insert(RESOURCE_ID, link, title, content, nd_date, s_date, not_date)
         except:
             pass
         q.task_done()
 
-    def process(self, i):
+    def process(self, q):
+        i = q.get()
         RESOURCE_ID = self.res[i][0]
         RESOURCE_NAME = self.res[i][1]
         RESOURCE_URL = self.res[i][2]
@@ -168,7 +220,7 @@ class Parser:
         fin_dates = []
 
         self.link_title[RESOURCE_URL] = {}
-        self.link_date[RESOURCE_URL]= {}
+        self.link_date[RESOURCE_URL] = {}
 
         try:
             response = requests.get(RESOURCE_URL)
@@ -205,28 +257,38 @@ class Parser:
         for link in fin_links:
             links_queue.put(link)
         for i_compare in range(self.max_thread):
-            t = threading.Thread(target=self.compare, args=(i_compare, fin_titles, fin_dates, links_queue, RESOURCE_URL,))
+            t = threading.Thread(target=self.compare,
+                                 args=(i_compare, fin_titles, links_queue, RESOURCE_URL,))
             t.setDaemon(True)
             t.start()
         links_queue.join()
 
         if self._console:
-            sprint("РЕСУРС: " + RESOURCE_URL + " найдено " + str(len(self.link_title[RESOURCE_URL].items())+1) + " новостей.")
+            sprint("РЕСУРС: " + RESOURCE_URL + " найдено " + str(
+                len(self.link_title[RESOURCE_URL].items()) + 1) + " новостей.")
 
         links_queue = queue.Queue()
         for link in fin_links:
             links_queue.put(link)
         for i_final in range(len(fin_links)):
-            t = threading.Thread(target=self.final, args=(bottom_tag, RESOURCE_ID, links_queue, RESOURCE_URL,))
+            t = threading.Thread(target=self.final,
+                                 args=(bottom_tag, fin_dates, RESOURCE_ID, links_queue, RESOURCE_URL,))
             t.setDaemon(True)
             t.start()
         links_queue.join()
+        q.task_done()
 
     def start(self):
+        i_queue = queue.Queue()
         for i in range(len(self.res)):
-            t = threading.Thread(target=self.process(i))
+            i_queue.put(i)
+        ran = min(self.max_thread, len(self.res))
+        for i in range(ran):
+            t = threading.Thread(target=self.process, args=(i_queue,))
             t.setDaemon(True)
             t.start()
+        i_queue.join()
+
 
 if __name__ == '__main__':
     p = Parser()
