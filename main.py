@@ -16,6 +16,7 @@ class Parser:
         self.res = self.db_get()
         self.link_title = {}
         self.link_date = {}
+        self.link_contents = {}
         self.max_thread = 15
 
     def db_insert(self, res_id, link, title, content, nd_date, s_date, not_date):
@@ -79,12 +80,10 @@ class Parser:
                             break
         return d
 
-    def get_content(self, tag, dates, link, RESOURCE_URL):
+    def get_content(self, tag, dates, link, soup, RESOURCE_URL):
         if self._console:
             sprint("Получение контента: " + link)
         fin_content = ""
-        response = requests.get(link)
-        soup = BeautifulSoup(response.text, 'lxml')
         contents = self.finder(tag, soup)
         url_pattern = r'https://[\S]+'
         for content in contents:
@@ -166,7 +165,7 @@ class Parser:
             _data += soup.find_all(el)
         return _data
 
-    def compare(self, _id, titles, q, url):
+    def compare(self, _id, titles, q, RESOURCE_URL, bottom_tag, fin_dates):
         while True:
             link = q.get()
             if self._console:
@@ -185,25 +184,11 @@ class Parser:
                             flag = True
                             break
                     if not flag:
-                        self.link_title[url][link] = titles[i]
+                        content = self.get_content(bottom_tag, fin_dates, link, soup, RESOURCE_URL)
+                        self.link_title[RESOURCE_URL][link] = titles[i]
+                        self.link_contents[RESOURCE_URL][link] = content
                         break
             q.task_done()
-
-    def final(self, bottom_tag, fin_dates, RESOURCE_ID, q, RESOURCE_URL):
-        link = q.get()
-        content = self.get_content(bottom_tag, fin_dates, link, RESOURCE_URL)
-        try:
-            title = self.link_title[RESOURCE_URL][link]
-
-            d = self.link_date[RESOURCE_URL][link]
-            s_date = str(time.time())
-            not_date = str(dateparser.parse(str(d), date_formats=['%Y %B %d']))
-            t = (d.year, d.month, d.day, d.hour, d.minute, d.second, d.microsecond, 0, 0)
-            nd_date = str(time.mktime(t))
-            self.db_insert(RESOURCE_ID, link, title, content, nd_date, s_date, not_date)
-        except:
-            pass
-        q.task_done()
 
     def process(self, q):
         i = q.get()
@@ -221,6 +206,7 @@ class Parser:
 
         self.link_title[RESOURCE_URL] = {}
         self.link_date[RESOURCE_URL] = {}
+        self.link_contents[RESOURCE_URL] = {}
 
         try:
             response = requests.get(RESOURCE_URL)
@@ -258,7 +244,7 @@ class Parser:
             links_queue.put(link)
         for i_compare in range(self.max_thread):
             t = threading.Thread(target=self.compare,
-                                 args=(i_compare, fin_titles, links_queue, RESOURCE_URL,))
+                                 args=(i_compare, fin_titles, links_queue, RESOURCE_URL, bottom_tag, fin_dates))
             t.setDaemon(True)
             t.start()
         links_queue.join()
@@ -267,15 +253,18 @@ class Parser:
             sprint("РЕСУРС: " + RESOURCE_URL + " найдено " + str(
                 len(self.link_title[RESOURCE_URL].items()) + 1) + " новостей.")
 
-        links_queue = queue.Queue()
         for link in fin_links:
-            links_queue.put(link)
-        for i_final in range(len(fin_links)):
-            t = threading.Thread(target=self.final,
-                                 args=(bottom_tag, fin_dates, RESOURCE_ID, links_queue, RESOURCE_URL,))
-            t.setDaemon(True)
-            t.start()
-        links_queue.join()
+            try:
+                title = self.link_title[RESOURCE_URL][link]
+                content = self.link_contents[RESOURCE_URL][link]
+                d = self.link_date[RESOURCE_URL][link]
+                s_date = str(time.time())
+                not_date = str(dateparser.parse(str(d), date_formats=['%Y %B %d']))
+                t = (d.year, d.month, d.day, d.hour, d.minute, d.second, d.microsecond, 0, 0)
+                nd_date = str(time.mktime(t))
+                self.db_insert(RESOURCE_ID, link, title, content, nd_date, s_date, not_date)
+            except:
+                pass
         q.task_done()
 
     def start(self):
